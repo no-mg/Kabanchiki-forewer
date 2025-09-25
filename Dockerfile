@@ -1,31 +1,42 @@
-# Билд стадии
-FROM golang:1.25.1-alpine AS builder
-
-RUN apk add --no-cache git ca-certificates
-
+FROM rust:1.80 as builder
 WORKDIR /app
 
-COPY go.mod go.sum ./
+# Копируем файлы зависимостей
+COPY backend/Cargo.toml backend/Cargo.lock ./
+RUN mkdir -p src && echo "fn main(){}" > src/main.rs
 
-RUN go mod download
+# Собираем зависимости (кэшируем этот слой)
+RUN cargo build --release || true
 
-COPY . .
+# Копируем исходный код
+COPY backend/src ./src
+COPY backend/Cargo.toml backend/Cargo.lock ./
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server ./main.go
+# Собираем приложение
+RUN cargo build --release
 
-FROM alpine:3.18
-
-RUN apk add --no-cache ca-certificates
-
-RUN adduser -D -g '' appuser
-
-USER appuser
-
-COPY --from=builder --chown=appuser:appuser /app/server /app/server
-COPY --from=builder --chown=appuser:appuser /app/templates /app/templates
-
+FROM debian:bookworm-slim
 WORKDIR /app
+
+# Устанавливаем необходимые пакеты
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копируем собранное приложение
+COPY --from=builder /app/target/release/backend /usr/local/bin/backend
+
+# Копируем статические файлы и AI модель
+COPY backend/frontend ./frontend
+COPY ai_model ./ai_model
+
+# Настраиваем переменные окружения
+ENV RUST_LOG=info
+ENV MODEL_DIR=/app/ai_model
+ENV SERVER_HOST=0.0.0.0
+ENV SERVER_PORT=8080
 
 EXPOSE 8080
+CMD ["/usr/local/bin/backend"]
 
-ENTRYPOINT ["/app/server"]
